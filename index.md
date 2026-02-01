@@ -2,9 +2,7 @@
 
 ---
 
-### Investigating how the effects from IP and Cast on movie profitability have changed over time.
-
-[Blogpost](/sample_page)
+[Investigating how the effects from IP and Cast on movie profitability have changed over time](/sample_page)
 <img src="images/relative_change.png?raw=true"/>
 <img src="images/IP_percent.png?raw=true"/>
 

@@ -1,0 +1,514 @@
+---
+title: "How have the effects from IP and Cast on movie profitability changed over time?"
+author: Jack Cunningham
+format: html
+editor: visual
+echo:   false
+message: false
+warning: false
+---
+
+```{r}
+library(qs)
+library(tidyverse)
+library(mgcv)
+library(tvReg)
+library(ggrepel)
+library(ggthemes)
+library(zoo)
+library(gratia)
+```
+
+```{r}
+modeling_data <- qread("D:/Portfolio Projects/moviestar_analysis/Data/Processed_Data/Modeling/Combined/modeling_data.qs")
+movie_df <- modeling_data$movie_level_df
+actor_df <- modeling_data$actor_level_df
+```
+
+# Research Motivation & Question
+
+A common belief among people who follow the box office is that movie stars don't draw audiences the way they used to. Instead, the biggest hits today tend to be tied to established franchises, benefiting from familiar characters, shared universes, and nostalgia from earlier releases.
+
+This project looks at whether that belief actually holds up in the data, or whether it's driven by how easy it is to remember the massive successes of franchises like Marvel or Star Wars.
+
+In particular, I'm interested in whether star power has actually become less important over time, compared to the pull of established franchises.
+
+# Data Overview
+
+The data for this project is sourced from The Movie Database (TMDB). The sample consists of the 50 highest-budgeted English-language films released each year between 1970 and 2024 that received a full theatrical release.
+
+Focusing on high-budget theatrical films allows the analysis to concentrate on projects where commercial performance is a central objective, while excluding smaller art-house releases that often operate under different success criteria.
+
+For each film, the dataset includes information on release date, production budget, box office revenue, cast members, and any collection or franchise the film is associated with.
+
+# Key Measures
+
+Two core challenges in this analysis are defining star power within a cast and separating it from the pull of established franchises. When a movie performs well at the box office, it is not always obvious why. Is the success driven by the lead actor, or is the film benefiting from being part of a popular series with a built-in audience?
+
+The same ambiguity exists on the downside. When a film underperforms, it is unclear whether that outcome reflects weak audience interest in the cast, poor execution, or simply the limits of a franchise that audiences were never particularly excited about in the first place.
+
+These challenges make it necessary to construct measures of star power and franchise strength that can assign credit more consistently across both successes and failures. This led to the use of a value above replacement approach.
+
+#### Value Above Replacement
+
+Value above replacement methods are frequently used in sports and originated in the sabermetric revolution in baseball. The basic idea is that if we can set a baseline of performance and then analyze how much individual components contribute to outcomes above or below that baseline. In baseball, for example, wins above replacement (WAR) separates a player's value into offensive and defensive contributions.
+
+I apply this same idea to movie performance by allocating credit between intellectual property and cast.
+
+First, a baseline model is fit using a film's budget, genre, and release year to estimate expected profitability, to be consistent we use the generic estimate of revenue minus 2.5 times budget. This allows movies to be compared on a common scale by examining the difference between observed outcomes and what would be expected based on these core characteristics alone.
+
+Take 1978 for example:
+
+```{r}
+movie_df <- movie_df |> mutate(
+  successful_outlier = resid0 > 2,
+  failure_outlier    = resid0 < -2
+)
+```
+
+```{r}
+movie_df |> 
+  filter(year == 1978) |> 
+  ggplot(aes(x = release_date, y = resid0)) +
+  geom_point(aes(color = case_when(successful_outlier ~ "High",
+               failure_outlier ~ "Low", (!successful_outlier|!failure_outlier) ~ "Normal")), show.legend = FALSE) +
+  geom_text_repel(data = movie_df |> filter((year == 1978)&(abs(resid0) > 2)),
+                         aes(label = title), vjust = -.1) +
+  scale_color_manual(
+      values = c(
+        "High" = "green",
+        "Low"  = "red",
+        "Normal" = "black"
+      )) +
+  labs(x = "Date", y = "Performance Relative to Expectation (SDs)", 
+       title = "Movies in 1978", subtitle = "Expected Performance is based on a baseline model using budget, genre and release year",
+       caption = "Figure 1") +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = .5) +
+  theme_minimal()
+```
+
+As Figure 1 shows, films released in the same year can differ substantially in how much they exceed or fall short of expectations. Some films, such as Halloween, dramatically outperform what would be predicted based on budget and genre alone, while others fall well short.
+
+The next question is how that excess performance should be attributed between the strength of the underlying intellectual property and the star power of the cast.
+
+A key principle in this attribution is that only information available prior to a film's release can be used. For example, an actor like Tom Cruise is not treated as a star in his early roles, but only becomes one after establishing a track record of successful leading performances. Similarly, when evaluating the first entry in a franchise, no information about future sequels is used, ensuring that credit is not assigned based on outcomes that were unknowable at the time.
+
+## Intellectual Property Power
+
+A consistent ordering is required to assign credit across films.. Allocating performance to Intellectual Property serves two core purposes. For original films we can confidently set this metric to zero and assign credit entirely to the cast. For sequels, expected performance is naturally linked to the success of prior entries.
+
+This order is especially important for well-established franchises. For instance, a reboot of Star Wars enters theaters with incredible tailwinds from previous successes. It would be misleading to attribute most of that expected success to the cast. To capture this effect, intellectual property power is measured using two complementary metrics: IP Stock and IP Momentum.
+
+### IP Stock
+
+IP Stock captures the accumulated performance of a franchise over time. It is defined as the cumulative sum of residual performance from all prior films within a given franchise. In effect, IP Stock represents the level of audience goodwill a franchise has built up before the release of a new entry.
+
+Take the Star Wars franchise for instance:
+
+```{r}
+plot_df <- movie_df |>
+  group_by(collection_id) |> 
+  arrange(release_date) |> 
+  mutate(
+    y_prev = lag(ip_power_evergreen_prior),
+    delta  = ip_power_evergreen_prior - y_prev
+  ) |> 
+  filter(!is.na(delta), delta != 0)
+```
+
+```{r}
+movie_df |>
+  filter(collection_name == "Star Wars Collection") |> 
+  ggplot(aes(x = release_date, y = ip_power_evergreen_prior)) +
+  geom_point() +
+  geom_segment(
+    data = plot_df |> filter(collection_name == "Star Wars Collection"),
+    aes(x = release_date, xend = release_date, y = y_prev, 
+        yend = ip_power_evergreen_prior - .25), 
+    arrow = arrow(length = unit(.1, "inches"), type = "closed"),
+    color = "green"
+  ) +
+  geom_text(
+    data = plot_df |> filter(collection_name == "Star Wars Collection"),
+    aes(
+      x = release_date,
+      y = (y_prev + ip_power_evergreen_prior)/2,
+      label = sprintf("%.2f", delta)
+    ),
+    nudge_x = 550,
+    size = 3
+  ) +
+  geom_line(linewidth = .6, alpha = .5,linetype = "dashed") +
+  labs(x = "Date", y = "IP Stock", 
+       title = "Star Wars IP Stock", subtitle = "IP Stock is the cumulative sum of residual performance from prior franchise entries",
+       caption = "Figure 2") +
+  theme(
+    panel.grid.minor.x = element_blank()
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank()
+  )
+```
+
+### IP Momentum
+
+IP Momentum, on the other hand, captures the recent performance of a franchise using a decaying sum that places greater weight on more recent entries. This allows the measure to reflect how audience interest builds, or fades, as a series progresses, such as across a trilogy. Let's take a look at *Star Wars* momentum:
+
+```{r}
+eras <- tribble(
+  ~eta,                ~start,              ~end,
+  "Original Triology", as.Date("1977-05-25"), as.Date("1983-05-25"),
+  "Prequel Triology",  as.Date("1999-05-19"), as.Date("2005-05-17"),
+  "Sequel Triology",   as.Date("2015-12-15"), as.Date("2019-12-18")
+)
+movie_df |> 
+  filter(collection_name == "Star Wars Collection") |> 
+  ggplot(aes(x = release_date, y = ip_power_momentum_prior)) +
+  geom_point() +
+  geom_line(linewidth = .6, alpha = .5,linetype = "dashed") +
+  labs(x = "Date", y = "IP Momentum", title = "Star Wars IP Momentum",
+       subtitle = "IP Momentum reflects recent performance with greater weight placed on more recent entries", caption = "Figure 3") +
+  geom_rect(data = eras,
+            aes(xmin = start, xmax = end, ymin = -Inf, ymax = Inf), 
+            inherit.aes = FALSE, alpha = .08, fill = "blue") +
+  theme_minimal()
+```
+
+Figure 3 shows how IP momentum for the Star Wars franchise evolves over time. Momentum rises sharply during the original trilogy. The prequel trilogy generates a renewed increase in momentum, though growth is muted and levels off after weaker reception to later entries. The sequel trilogy follows a similar pattern. Between the three trilogies momentum tails off, highlighting the short-run and decaying nature of this measure.
+
+## Cast Star Power
+
+With IP Stock and IP Momentum defined for each film, cast measures of star power can now be constructed. As discussed earlier, it would be inappropriate to attribute excess performance to the cast without first accounting for the contribution of the underlying intellectual property.
+
+To address this, a new baseline is estimated incorporating IP Stock and IP Momentum prior to a film's release. Performance relative to this updated baseline reflects variation that cannot be explained by franchise strength alone and thus provides a cleaner foundation for measuring cast star power. Figure 4 illustrates how relative performance for Star Wars films changes once IP effects are taken into account.
+
+```{r}
+baseline_plot_df <- movie_df |> 
+  filter(collection_name == "Star Wars Collection") |> 
+  select(release_date, title, resid0, resid_actor) |> 
+  mutate(difference = resid0 - resid_actor) |> 
+  pivot_longer(
+    cols = c(resid0 , resid_actor),
+    names_to = "residual_label",
+    values_to = "residual"
+  ) |> 
+  mutate(residual_label = factor(residual_label, 
+                                 levels = c("resid0","resid_actor")))
+```
+
+```{r}
+baseline_plot_df |>
+  ggplot(aes(x = release_date, y = residual, col = residual_label)) +
+  geom_point() +
+  geom_segment(data = movie_df |> 
+                 filter(collection_name == "Star Wars Collection") |> 
+                 mutate(difference = resid0 - resid_actor),
+        aes(x = release_date, xend = release_date, y = resid0, 
+        yend = resid_actor + ifelse(difference < 0, -.1,.1)),
+        arrow = arrow(length = unit(.05, "inches"), type = "closed"),
+        inherit.aes = FALSE) +
+  labs(x = "Date", y = "Performance Relative to Expectation (SDs)",
+       title = "Star Wars Performance Relative to Baseline, Before and After IP Adjustment", subtitle = "IP Adjusted Baseline adds prior IP Power and IP Momentum to model",
+       color = "") +
+  scale_color_manual(
+    values = c("resid0" = "blue","resid_actor" = "red"),
+    labels = c(
+      resid0 = "Before IP Adjustment",
+      resid_actor = "After IP Adjustment",
+      caption = "Fig 4"
+    )
+  ) +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = .5) +
+  theme_minimal()
+```
+
+After accounting for IP Stock and IP Momentum, apparent over performance is substantially reduced for most Star Wars films. The only exception is the original Star Wars release, which now has a larger positive residual than before. This is expected, as the first film did not benefit from any pre-existing franchise strength its breakout success was less anticipated.
+
+This IP-adjusted baseline provides a cleaner foundation for attributing remaining excess performance to cast-level factors. Credit is allocated across the top five billed actors to reflect prominence in the film, with 40% assigned to the lead actor, 25% to the second-billed actor, and the remaining 35% split evenly across the next three billed roles.
+
+### Actor Stock and Actor Momentum
+
+Using the same value above replacement framework applied to intellectual property, cast star power has two components, Actor Stock and Actor Momentum. Actor Stock captures the cumulative performance of an actor's prior films while Actor Momentum emphasizes more recent successes by placing greater weight on newer roles. Both measures are constructed using only information available prior to a film's release and are calculated after accounting for intellectual property effects, ensuring actor-level contributions are not conflated with franchise strength.
+
+Actor Momentum is especially useful for assessing actors with intermittent periods of commercial success, which are harder to capture through Actor Stock alone. An example would be Eddie Murphy:
+
+```{r}
+eddie_long <- actor_df |> 
+  filter(actor_name == "Eddie Murphy") |> 
+  select(release_date, actor_star_power_momentum, actor_star_power_prior) |> 
+  pivot_longer(
+    cols = c(actor_star_power_momentum, actor_star_power_prior),
+    names_to = "metric",
+    values_to = "value"
+  ) |> 
+  mutate(
+    metric = recode(metric,
+                    actor_star_power_momentum = "Actor Momentum",
+                    actor_star_power_prior    =  "Actor Stock")
+  )
+  
+```
+
+```{r}
+ggplot(eddie_long, aes(x = release_date, y = value)) +
+  geom_hline(data = subset(eddie_long, metric == "Actor Momentum"),
+             aes(yintercept = 0),
+             inherit.aes = FALSE,
+             linetype = "dotted",
+             alpha = 0.5) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 1.1) +
+  facet_wrap(~ metric, ncol = 2, scales = "free_y") +
+  labs(
+    title = "Eddie Murphy: Actor Momentum vs Actor Stock",
+    x = "Date",
+    y = NULL,
+    caption = "Figure 5"
+  ) +
+  theme_minimal()
+```
+
+Eddie Murphy emerged as a superstar in the 80s, driven by a run of highly successful films such as Trading Places and Beverly Hills Cop. In the 1990s, however, his commercial performance became more uneven, with periods of weaker box-office results punctuated by occasional successes. This career arc is a usual illustration of the ups and downs that are commonplace in acting. While Actor Stock reflects the cumulative built in his early 80s peak, Actor Momentum is flexible and able to adapt to downturns demonstrating how these two metrics capture distinct aspects of star power over time.
+
+After constructing actor-level stock and momentum measures, we collapse these quantities back to the movie level to make them usable alongside film attributes and IP metrics. For each film, actor contributions are combined using the same billing-weight scheme used in attribution: 40% to the lead, 25% to the second-billed actor, and the remaining 35% split evenly across the next three. This produces a single, weighted actor stock value and a single, weighted actor momentum value for each movie, both based exclusively on information available prior to release.
+
+At this point, every film is characterized by four pre-release explanatory measures, IP Stock, IP Momentum, Actor Stock, and Actor Momentum, allowing all subsequent analysis to proceed at the movie level without revisiting cast-level structure.
+
+# Methodology
+
+To examine how the influence of IP and actor related factors changes over time, we use a generalized additive model (GAM). This approach allows each variable's effect to vary smoothly with release year, capturing gradual shifts in audience preferences and industry structure without imposing a fixed parametric form. All IP and actor related variables are centered and scaled, allowing for their effects to be compared directly.
+
+# Results
+
+After model selection we ended up with a model with year, budget, IP Momentum (smoothed over year) and Actor Momentum (smoothed over year) all being statistically significant. IP Momentum and Actor Momentum have statistically significant effects over time. The estimated time varying effects are shown below:
+
+```{r}
+library(mgcv)
+df <- movie_df |>
+  mutate(
+    ip_z    = as.numeric(scale(ip_power_momentum_prior)),
+    actor_z = as.numeric(scale(actor_momentum_prior_sum)),
+    year_c  = year - mean(year),
+    log_budget = log(budget)
+  )
+
+tvc_mod <- gam(
+  log_profitability ~
+    log_budget +
+    #ip_z + actor_z +
+    factor(year_c) +
+    s(year_c, by = ip_z, k = 10) +
+    s(year_c, by = actor_z, k = 10),
+  data = df,
+  method = "REML"
+)
+```
+
+```{r}
+year_grid <- tibble(
+  year_c = seq(min(df$year_c), max(df$year_c), length.out = 200),
+  ip_z = 0,
+  actor_z = 0,
+  log_budget = mean(df$log_budget),
+  year = mean(df$year)  # only needed to satisfy factor(year_c)
+)
+```
+
+```{r}
+library(gratia)
+
+# Inspect smooth names (important!)
+smooths(tvc_mod)
+```
+
+```{r}
+ip_eff <- smooth_estimates(
+  tvc_mod,
+  select = "s(year_c):ip_z",
+  newdata = year_grid
+)
+
+actor_eff <- smooth_estimates(
+  tvc_mod,
+  select = "s(year_c):actor_z",
+  newdata = year_grid
+)
+```
+
+```{r}
+ip_df <- ip_eff |>
+  transmute(
+    year_c,
+    effect = .estimate,
+    lo = .estimate - 1.96 * .se,
+    hi = .estimate + 1.96 * .se,
+    term = "IP Momentum"
+  )
+
+actor_df <- actor_eff |>
+  transmute(
+    year_c,
+    effect = .estimate,
+    lo = .estimate - 1.96 * .se,
+    hi = .estimate + 1.96 * .se,
+    term = "Actor Momentum"
+  )
+
+plot_df <- bind_rows(ip_df, actor_df)
+```
+
+```{r}
+library(ggplot2)
+plot_df <- plot_df |>
+  mutate(year = year_c + mean(df$year))
+
+ggplot(plot_df, aes(x = year, y = effect)) +
+  geom_ribbon(aes(ymin = lo, ymax = hi), alpha = 0.25) +
+  geom_line(linewidth = 1) +
+  facet_wrap(~ term, scales = "free_y") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    x = "Year",
+    y = "Marginal effect on log profitability",
+    title = "Time-Varying Effects of IP and Actor Momentum",
+    caption = "Figure 6"
+  ) +
+  theme_minimal()
+```
+
+Figure 6 shows the estimated time-varying effects of Actor Momentum and IP Momentum on log profitability conditional on year fixed effects.
+
+Actor Momentum exhibits a hump shaped pattern. Its marginal effect rises through the 1970s peaking in the late 1980s then declining steadily until 2010. From 2010 to 2024, the estimated effect increases modestly and approaches levels comparable to its earlier peak; however, this late-period increase is accompanied by wider confidence intervals, reflecting greater uncertainty in recent years.
+
+In contrast, IP Momentum displays an approximately linear upward trend over the sample period. Between 1970 and 2024, the marginal effect of IP Momentum on log profitability nearly doubles. At all points in time, the effect remains statistically different from zero, indicating that films associated with stronger IP momentum consistently outperform weaker-IP films within the same release year.
+
+Taken together, these results suggest a shift in the sources of within-year box-office differentiation, away from actor-driven momentum and toward increasingly dominant IP-based advantages.
+
+A useful comparison is the difference between these two effects over time:
+
+```{r}
+yr_grid <- tibble(year_c = seq(min(df$year_c, na.rm=TRUE),
+                              max(df$year_c, na.rm=TRUE),
+                              length.out = 200))
+
+# 2) Extract smooth estimates on the same grid
+# NOTE: use the smooth labels from your model.
+# From your plot labels, they look like:
+#   s(year_c, by = ip_power_momentum_prior)
+#   s(year_c, by = actor_momentum_prior_sum)
+
+ip_s  <- smooth_estimates(tvc_mod,
+                          smooth = "s(year_c):ip_z",
+                          newdata = yr_grid)
+
+act_s <- smooth_estimates(tvc_mod,
+                          smooth = "s(year_c):actor_z",
+                          newdata = yr_grid)
+
+# 3) Join + compute dominance Δ(t)
+dom <- ip_s %>%
+  select(year_c, ip_est = .estimate, ip_se = .se) %>%
+  left_join(
+    act_s %>% select(year_c, act_est = .estimate, act_se = .se),
+    by = "year_c"
+  ) %>%
+  mutate(
+    dom_est = ip_est - act_est,
+    dom_se  = sqrt(ip_se^2 + act_se^2),  # conservative (ignores covariance)
+    dom_lo  = dom_est - 1.96 * dom_se,
+    dom_hi  = dom_est + 1.96 * dom_se
+  )
+
+dom <- dom |>
+  mutate(year = year_c + mean(df$year))
+# 4) Plot
+ggplot(dom, aes(x = year
+                , y = dom_est)) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_ribbon(aes(ymin = dom_lo, ymax = dom_hi), alpha = 0.25) +
+  geom_line(linewidth = 1) +
+  labs(
+    title = "Relative Dominance Over Time: IP vs Actor Momentum",
+    subtitle = expression(Delta(t)==beta[IP](t)-beta[Actor](t)),
+    x = "Year",
+    y = expression(Delta(t)),
+    caption = "Figure 7"
+  ) +
+  theme_minimal()
+```
+
+Figure 7 plots the estimated difference between the time-varying marginal effects of IP Momentum and Actor Momentum on log profitability. Positive values indicate periods in which IP Momentum has a larger within-year profitability effect than Actor Momentum. The estimated difference crosses below zero only during the early 1980s through the early 1990s, indicating a period in which actor momentum was at least as important as IP momentum in differentiating film profitability. After this period, IP Momentum consistently exhibits a larger marginal effect, increasing steadily through the 2000s before leveling off in the early 2010s. Although uncertainty is relatively wide throughout the sample, the confidence interval excludes zero for much of the period from roughly 2000 to 2015, providing evidence that IP Momentum was the dominant driver of within-year profitability during this era. Overall, the figure indicates that IP Momentum has exerted a larger profitability effect than Actor Momentum since the mid-1990s.
+
+# Interpretation & Implications
+
+Since each production company faces finite budgets, decisions about how much to allocate to intellectual property versus cast strength involve clear trade-offs.. Understanding whether IP strength or cast strength are more strongly associated with excess performance is invaluable when production budgets are in the hundreds of millions. As displayed in the previous section IP Momentum, a metric representing IP effect, has become a stronger predictor of profitability over time.
+
+```{r}
+ip_share_df <- movie_df |> 
+  group_by(year) |> 
+  summarize(percent_ip = sum(established_ip)/n()*100) |> 
+  mutate(pct_ip_roll5 = rollmean(percent_ip, k = 4, fill = NA, align = "right"))
+
+ggplot(ip_share_df, aes(year, percent_ip)) +
+  geom_rect(
+    xmin = 2019.5, xmax = 2022.5, ymin = -Inf, ymax = Inf,
+   alpha = .1, inherit.aes = FALSE, fill = "lightblue",linewidth = .6
+  ) +
+  geom_line(alpha = .2) +
+  geom_line(aes(y = pct_ip_roll5), linewidth = 1) +
+  labs(x = "Year", y = "Percent of films with established IP",title = "Percent of top 50 budgeted films with an established IP before release", subtitle = "Grey line is percent per year. Black line is trailing 5-year average.", caption = "Figure 8") +
+  geom_text(x = 2021, y = 52, label = "COVID\n19", size = 3) +
+  theme_minimal()
+  
+  
+```
+
+Consistent with this shift, the share of top 50 budgeted films associated with an established IP has risen steadily since the early 2000s (Figure 8).
+
+In the results section we also saw Actor Momentum's effect on profitability decline after a peak near the turn of 1990.
+
+```{r}
+momentum_share_df <- movie_df |> 
+  group_by(year) |> 
+  summarize(average_actor_momentum = mean(actor_momentum_prior_sum)) |> 
+  mutate(average_actor_momentum_roll = 
+           rollmean(average_actor_momentum, k = 4, fill = NA, align = "right"))
+
+ggplot(momentum_share_df, aes(year, average_actor_momentum)) +
+  geom_rect(
+    xmin = 2019.5, xmax = 2022.5, ymin = -Inf, ymax = Inf,
+   alpha = .1, inherit.aes = FALSE, fill = "lightblue",linewidth = .6
+  ) +
+  geom_line(alpha = .2) +
+
+  geom_line(aes(y = average_actor_momentum_roll), linewidth = 1) +
+  labs(x = "Year", y = "Actor Momentum",title = "Actor Momentum in the top 50 budgeted films", subtitle = "Grey line is Actor Momentum per year. Black line is trailing 5-year average.", caption = "Figure 9") +
+  geom_text(x = 2021, y = 52, label = "COVID\n19", size = 3) +
+  theme_minimal()
+```
+
+In line with that decline, the Actor Momentum in casts of Top 50 budgeted movies has steadily declined since its peak in 1995 (Figure 9).
+
+Taken together, these results suggest a shift in the relative importance of intellectual property and cast-related factors among the highest-budgeted films since the mid-1990s. As the association between IP-related momentum and profitability has strengthened over time, the share of top-budgeted releases tied to established IP has also increased, while measures of actor momentum indicate a reduced role for densely stacked casts. Although there is some indication of a modest rebound in actor-related effects in recent years, it remains an open question whether this reflects a persistent change or a temporary fluctuation.
+
+# Limitations
+
+This analysis is intended to provide descriptive insight into how actor- and IP-related effects have evolved over time, and several limitations should be kept in mind when interpreting the results.
+
+-   Scope of IP measurement: IP effects are measured only through prior film releases in a franchise. Intellectual property originating in other media, such as books, television series or video games is not captured. This may understate IP strength for certain titles.
+
+-   Early period data constraints: Data availability before the 1970s is limited, making estimates of actor and IP effects in the early years of our sample less precise
+
+-   Unobserved drivers of profitability: Movie profitability is influenced by many factors not included in the model, such as directors, production companies, release timing, and competition in the box office. Incorporating these elements would require an expansion of scope beyond the goals of this project.
+
+-   Cost and revenue opacity: Publicly available financial data are not reported at a granular level, limiting visibility into marketing expenditures, cast compensation, backend participation, and other contractual arrangements that may affect both budgets and profitability.
+
+Despite these limitations, the framework provides a consistent way to compare the evolving roles of IP and cast factors within the high budget theatrical market.
+
+# Conclusion
+
+At the start of this project, we pointed to a familiar observation: big movies today seem to rely more on intellectual property and less on star-studded casts. Looking across several decades of high-budget releases, the data largely support that intuition. Over time, recent franchise performance has become increasingly associated with profitability, and the share of top-budget films tied to established IP has risen steadily since the early 2000s. Over the same period, short-run actor momentum effects on profitability have declined, and actor momentum within casts has also fallen, indicating that modern ensembles are less densely packed with high-momentum stars than in earlier decades.
+
+However, this does not spell the end of the movie star or the original movie. The growth of streaming platforms has expanded the space for lower budget original projects, reducing risk for producers while creating new opportunities for actors outside of theatrical blockbusters. At the same time, releasing a large budget film in theaters during this post pandemic landscape remains a high risk endeavor. In this environment, relying on established IP becomes an appealing way to hedge against downside risk.

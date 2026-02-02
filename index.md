@@ -3,7 +3,7 @@
 ---
 
 [Have Movie Stars Lost Their Edge? How IP and Cast Effects on Profitability Have Changed Over Time](https://jccoolguy.github.io/moviestar_analysis/blogpost.html)
-<img src="images/actor_momentum?raw=true"/>
+<img src="images/actor_momentum.png?raw=true"/>
 
 
 

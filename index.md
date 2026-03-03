@@ -2,6 +2,7 @@
 
 ---
 [Better Movie Reviews? The problem with Tomatometer rating, and how to fix it](https://jgavc.github.io/rotten_tomatoes_empirical_bayes/)
+[Try the model here!](https://jgavc.shinyapps.io/rotten_tomatoes_empirical_bayes/)
 <img src="images/bayesian_shrinkage.png?raw=true"/>
 
 [Have Movie Stars Lost Their Edge? How IP and Cast Effects on Profitability Have Changed Over Time](https://jgavc.github.io/moviestar_analysis/)

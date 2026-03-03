@@ -2,6 +2,7 @@
 
 ---
 [Better Movie Reviews? The problem with Tomatometer rating, and how to fix it](https://jgavc.github.io/rotten_tomatoes_empirical_bayes/)
+<br>
 [Try the model here!](https://jgavc.shinyapps.io/rotten_tomatoes_empirical_bayes/)
 <img src="images/bayesian_shrinkage.png?raw=true"/>
 
